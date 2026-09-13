@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timezone
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -56,7 +56,7 @@ if not DEMO_MODE:
 
 app = FastAPI(
     title="ScholarProof API",
-    version="0.7.0",
+    version="0.8.0",
     description=(
         "Evidence-first scholarship and "
         "admissions verification API."
@@ -271,9 +271,7 @@ REPORT_SCHEMA = {
 
 def hostname_from_url(url: str) -> str:
     try:
-        host = urlparse(url).hostname or ""
-
-        host = host.lower()
+        host = (urlparse(url).hostname or "").lower()
 
         if host.startswith("www."):
             host = host[4:]
@@ -301,52 +299,115 @@ def clean_domain(value: str) -> str:
     return value
 
 
-def domain_matches(
-    url: str,
-    official_domain: str,
-) -> bool:
-
+def domain_matches(url: str, official_domain: str) -> bool:
     host = hostname_from_url(url)
-
-    official = clean_domain(
-        official_domain
-    )
+    official = clean_domain(official_domain)
 
     if not host or not official:
         return False
 
-    return (
-        host == official
-        or host.endswith("." + official)
-    )
+    return host == official or host.endswith("." + official)
 
 
-def normalize_url(url: str) -> str:
+def canonical_url_key(url: str) -> str:
     try:
-        parsed = urlparse(url)
+        parsed = urlparse((url or "").strip())
 
-        host = parsed.hostname or ""
-
-        host = host.lower()
+        host = (parsed.hostname or "").lower()
 
         if host.startswith("www."):
             host = host[4:]
 
-        path = parsed.path.rstrip("/")
+        path = parsed.path or "/"
 
-        return urlunparse(
-            (
-                parsed.scheme.lower() or "https",
-                host,
-                path,
-                "",
-                "",
-                "",
-            )
+        if path != "/":
+            path = path.rstrip("/")
+
+        return f"{host}{path}".lower()
+
+    except Exception:
+        return (url or "").strip().lower()
+
+
+def valid_http_url(url: str) -> bool:
+    try:
+        parsed = urlparse((url or "").strip())
+
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(parsed.netloc)
         )
 
     except Exception:
-        return url
+        return False
+
+
+def humanize_source_title(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        path = (parsed.path or "").strip("/")
+
+        if path:
+            last = path.split("/")[-1]
+            last = (
+                last
+                .replace("-", " ")
+                .replace("_", " ")
+                .strip()
+            )
+
+            if last and len(last) > 2:
+                return last.title()
+
+        host = hostname_from_url(url)
+
+        if host:
+            return host
+
+    except Exception:
+        pass
+
+    return "Official source"
+
+
+def useful_title(title: str, url: str) -> bool:
+    title = (title or "").strip()
+
+    if not title:
+        return False
+
+    host = hostname_from_url(url)
+
+    normalized = (
+        title
+        .lower()
+        .replace("www.", "")
+        .strip()
+    )
+
+    if normalized in {
+        host,
+        f"https://{host}",
+        f"http://{host}",
+    }:
+        return False
+
+    return len(title) >= 4
+
+
+def choose_title(
+    model_title: str,
+    search_title: str,
+    url: str,
+) -> str:
+
+    if useful_title(model_title, url):
+        return model_title.strip()
+
+    if useful_title(search_title, url):
+        return search_title.strip()
+
+    return humanize_source_title(url)
 
 
 # =========================================================
@@ -355,70 +416,80 @@ def normalize_url(url: str) -> str:
 
 def extract_web_sources(response):
     """
-    Gets the URLs actually returned by OpenAI web search.
-
-    These are later used to reject source links
-    that were generated in text but were not
-    actually returned by web search.
+    Extract URLs actually returned by web search and URL citations.
+    These are used to reject invented or unsupported source links.
     """
 
+    raw = response.model_dump()
     collected = []
 
-    try:
-        raw = response.model_dump()
+    for item in raw.get("output", []):
+        item_type = item.get("type")
 
-        for item in raw.get("output", []):
-
-            if item.get("type") != "web_search_call":
-                continue
-
+        if item_type == "web_search_call":
             action = item.get("action") or {}
-
-            sources = action.get(
-                "sources"
-            ) or []
+            sources = action.get("sources") or []
 
             for source in sources:
-
                 url = source.get("url")
 
-                if not url:
+                if not valid_http_url(url):
                     continue
-
-                title = (
-                    source.get("title")
-                    or hostname_from_url(url)
-                    or "Web source"
-                )
 
                 collected.append(
                     {
-                        "title": title,
+                        "title": source.get("title") or "",
                         "url": url,
                     }
                 )
 
-    except Exception as error:
-        print(
-            "Could not extract web sources:",
-            repr(error),
-        )
+        if item_type == "message":
+            for content in item.get("content") or []:
+                for annotation in content.get("annotations") or []:
+                    if annotation.get("type") != "url_citation":
+                        continue
 
-    # Remove duplicates
+                    url = annotation.get("url")
+
+                    if not valid_http_url(url):
+                        continue
+
+                    collected.append(
+                        {
+                            "title": annotation.get("title") or "",
+                            "url": url,
+                        }
+                    )
+
+    # Deduplicate by host + path, ignoring query strings/fragments.
     unique = {}
 
     for source in collected:
+        key = canonical_url_key(source["url"])
 
-        key = normalize_url(
-            source["url"]
-        )
+        if not key:
+            continue
 
-        if key not in unique:
+        current = unique.get(key)
+
+        if current is None:
+            unique[key] = source
+            continue
+
+        # Prefer the entry with the more useful page title.
+        if (
+            not useful_title(
+                current.get("title", ""),
+                current["url"],
+            )
+            and useful_title(
+                source.get("title", ""),
+                source["url"],
+            )
+        ):
             unique[key] = source
 
-    return list(
-        unique.values()
-    )
+    return list(unique.values())
 
 
 # =========================================================
@@ -429,153 +500,158 @@ def validate_report_sources(
     report,
     actual_search_sources,
 ):
+    """
+    Public Sources contains only unique official pages that are
+    actually used by validated claim evidence.
+
+    A factual claim is downgraded to 'insufficient' when:
+    - its cited URL was not actually returned by web research, or
+    - the matched page is not on the institution's official domain.
+    """
 
     official_domain = clean_domain(
-        report.get(
-            "official_domain",
-            "",
-        )
+        report.get("official_domain", "")
     )
 
-    actual_map = {}
+    actual_map = {
+        canonical_url_key(source["url"]): source
+        for source in actual_search_sources
+        if valid_http_url(source.get("url", ""))
+    }
 
-    for source in actual_search_sources:
+    validated_sources = {}
 
-        normalized = normalize_url(
-            source["url"]
-        )
+    unmatched_claim_sources = 0
+    nonofficial_claim_sources = 0
+    claims_with_validated_source = 0
 
-        actual_map[
-            normalized
-        ] = source
-
-
-    official_sources = []
-
-    all_sources = []
-
-    for source in actual_search_sources:
-
-        is_official = domain_matches(
-            source["url"],
-            official_domain,
-        )
-
-        validated_source = {
-            "title": source["title"],
-            "url": source["url"],
-            "official": is_official,
-        }
-
-        all_sources.append(
-            validated_source
-        )
-
-        if is_official:
-            official_sources.append(
-                validated_source
-            )
-
-
-    unsupported_claims = 0
-
-    for claim in report.get(
-        "claims",
-        [],
-    ):
-
+    for claim in report.get("claims", []):
         claimed_url = (
-            claim.get(
-                "source_url",
-                "",
-            )
+            claim.get("source_url")
             or ""
-        )
+        ).strip()
 
-        normalized = normalize_url(
-            claimed_url
-        )
+        model_title = (
+            claim.get("source_title")
+            or ""
+        ).strip()
 
-        actual_source = actual_map.get(
-            normalized
-        )
+        key = canonical_url_key(claimed_url)
+        matched = actual_map.get(key)
 
+        # URL was not actually found by web research.
+        if not matched:
+            unmatched_claim_sources += 1
 
-        # Good:
-        # exact source URL was actually returned
-        # by the web search tool.
-        if actual_source:
-
-            claim["source_url"] = (
-                actual_source["url"]
-            )
-
+            claim["source_url"] = ""
             claim["source_title"] = (
-                actual_source["title"]
+                "Source link could not be independently confirmed"
             )
+
+            if claim.get("status") in {
+                "verified",
+                "partial",
+                "contradicted",
+            }:
+                claim["status"] = "insufficient"
+
+                claim["evidence"] = (
+                    (
+                        claim.get("evidence", "")
+                        or ""
+                    ).rstrip()
+                    + " ScholarProof could not match the cited page "
+                      "to a URL actually returned by web research."
+                ).strip()
 
             continue
 
+        actual_url = matched["url"]
 
-        # Otherwise do NOT silently trust
-        # an AI-generated URL.
-        unsupported_claims += 1
-
-        claim["source_url"] = ""
-
-        claim["source_title"] = (
-            "Exact evidence link "
-            "was not independently confirmed"
+        is_official = domain_matches(
+            actual_url,
+            official_domain,
         )
 
+        claim["source_url"] = actual_url
 
-        # ScholarProof is intentionally strict:
-        # a factual verdict without a verifiable
-        # source link is downgraded.
-        if claim.get("status") in {
-            "verified",
-            "partial",
-            "contradicted",
-        }:
+        claim["source_title"] = choose_title(
+            model_title,
+            matched.get("title", ""),
+            actual_url,
+        )
 
-            claim["status"] = (
-                "insufficient"
-            )
+        # Source exists, but it is not official primary evidence.
+        if not is_official:
+            nonofficial_claim_sources += 1
 
-            claim["evidence"] = (
-                claim.get(
-                    "evidence",
-                    ""
+            if claim.get("status") in {
+                "verified",
+                "partial",
+                "contradicted",
+            }:
+                claim["status"] = "insufficient"
+
+                claim["evidence"] = (
+                    (
+                        claim.get("evidence", "")
+                        or ""
+                    ).rstrip()
+                    + " The matched page is not on the institution's "
+                      "identified official domain, so ScholarProof does "
+                      "not treat it as decisive primary evidence."
+                ).strip()
+
+            continue
+
+        claims_with_validated_source += 1
+
+        source_key = canonical_url_key(actual_url)
+
+        if source_key not in validated_sources:
+            validated_sources[source_key] = {
+                "title": claim["source_title"],
+                "url": actual_url,
+                "official": True,
+            }
+
+        else:
+            current = validated_sources[source_key]
+
+            if (
+                not useful_title(
+                    current["title"],
+                    current["url"],
                 )
-                + " ScholarProof could not "
-                  "independently match the "
-                  "cited page to the URLs "
-                  "returned by web research."
-            )
+                and useful_title(
+                    claim["source_title"],
+                    actual_url,
+                )
+            ):
+                current["title"] = claim["source_title"]
 
-
-    # Replace model-created source list with
-    # the source list actually returned by
-    # the web search tool.
-    report["sources"] = (
-        official_sources
-        + [
-            source
-            for source in all_sources
-            if not source["official"]
-        ]
-    )[:12]
-
+    # IMPORTANT:
+    # Do not expose every page returned by web search.
+    # Only show official pages actually used by validated claims.
+    report["sources"] = list(
+        validated_sources.values()
+    )[:8]
 
     return report, {
         "search_sources_found":
             len(actual_search_sources),
 
-        "official_sources_found":
-            len(official_sources),
+        "validated_sources_shown":
+            len(report["sources"]),
+
+        "claims_with_validated_source":
+            claims_with_validated_source,
 
         "unmatched_claim_sources":
-            unsupported_claims,
+            unmatched_claim_sources,
+
+        "nonofficial_claim_sources":
+            nonofficial_claim_sources,
 
         "official_domain":
             official_domain,
@@ -706,57 +782,56 @@ Your job is to verify university, scholarship,
 admissions, funding, eligibility, deadline and
 application claims using CURRENT WEB RESEARCH.
 
-You MUST search the web before reaching factual
-conclusions.
+You MUST search the web before reaching factual conclusions.
 
-RESEARCH PROCESS
+RESEARCH RULES
 
 1. Detect the user's language.
 
-2. Research primarily in English when this produces
+2. Research primarily in English when this gives
    stronger official evidence.
 
 3. Return the final report in the user's language
    whenever possible.
 
-4. Identify the institution and its official domain.
+4. Identify the institution and its PRIMARY official domain.
 
 5. Separate every important factual claim.
 
 6. Prioritize PRIMARY SOURCES:
-   - official university websites
-   - official admissions offices
+   - official university pages
+   - official admissions pages
    - official scholarship pages
-   - official application guides
+   - official FAQs
+   - official current-cycle guides/PDFs
    - official government scholarship portals
-   - official policy documents
 
-7. Blogs, Reddit, social media, consultants,
-   scholarship aggregators and reposted information
-   are secondary evidence.
+7. Blogs, consultants, Reddit, social media and
+   scholarship aggregators are not decisive evidence.
 
 8. Never mark a claim VERIFIED merely because many
    unofficial websites repeat it.
 
 9. Check whether information belongs to the CURRENT
-   admissions cycle.
+   admissions or scholarship cycle.
 
-10. Check:
+10. Check relevant details including:
     - tuition
     - scholarship amount
-    - living stipend
+    - stipend
     - accommodation
-    - health insurance
+    - insurance
+    - airfare
     - eligibility
     - nationality restrictions
     - GPA
     - SAT / ACT
     - IELTS / TOEFL
     - application fee
-    - application deadline
-    - scholarship deadline
-    - required documents
+    - deadlines
+    - documents
     - application method
+    - scholarship conditions
 
 11. Perform a DEFENSIVE SECURITY REVIEW for:
     - unofficial domains
@@ -781,13 +856,43 @@ RESEARCH PROCESS
 
 15. Never invent a URL.
 
-16. For every claim, source_url MUST be a URL that
-    you actually found during web research.
+16. source_url MUST be a page that you actually
+    encountered during web research.
 
-17. Prefer the newest official source when two
+17. Prefer STABLE PUBLIC INFORMATION PAGES.
+
+18. Prefer:
+    - scholarship pages
+    - admissions pages
+    - FAQ pages
+    - official guides
+    - official PDFs
+
+19. Avoid using these as evidence unless absolutely necessary:
+    - login pages
+    - account dashboards
+    - application portals
+    - search-result pages
+
+20. Prefer a direct information page over a university homepage.
+
+21. One strong official source may support several claims.
+
+22. Do NOT create many duplicate sources for the same page.
+
+23. source_title must describe the PAGE.
+
+Good:
+"Undergraduate Scholarships"
+"Undergraduate Admissions FAQ"
+
+Bad:
+"ku.ac.ae"
+
+24. Prefer the newest official source when official
     sources disagree.
 
-18. Keep explanations concise but specific.
+25. Keep explanations concise and evidence-based.
 
 STATUS VALUES
 
@@ -796,7 +901,7 @@ partial
 contradicted
 insufficient
 
-Your output must follow the supplied JSON schema.
+Your output must follow the supplied JSON schema exactly.
 """
 
 
@@ -890,31 +995,26 @@ def demo_report():
             "admission.kaist.ac.kr",
 
         "verdict":
-            "Potentially misleading "
-            "information detected",
+            "Potentially misleading information detected",
 
         "summary":
-            "The submission mixes legitimate "
-            "scholarship information with claims "
-            "that should be checked through "
-            "official admissions channels.",
+            "The submission mixes legitimate scholarship "
+            "information with claims that should be checked "
+            "through official admissions channels.",
 
         "risk": "high",
 
         "claims": [
-
             {
                 "claim":
-                    "KAIST offers scholarships "
-                    "to international "
+                    "KAIST offers scholarships to international "
                     "undergraduate students.",
 
                 "status": "verified",
 
                 "evidence":
-                    "KAIST publishes scholarship "
-                    "information for international "
-                    "undergraduate applicants.",
+                    "KAIST publishes scholarship information for "
+                    "international undergraduate applicants.",
 
                 "source_title":
                     "KAIST Scholarship",
@@ -927,19 +1027,16 @@ def demo_report():
 
             {
                 "claim":
-                    "Applications must be "
-                    "submitted through Telegram.",
+                    "Applications must be submitted through Telegram.",
 
-                "status":
-                    "contradicted",
+                "status": "contradicted",
 
                 "evidence":
-                    "Official university "
-                    "applications use official "
+                    "Official applications use official university "
                     "admissions channels.",
 
                 "source_title":
-                    "KAIST Admissions",
+                    "KAIST International Admissions",
 
                 "source_url":
                     "https://admission.kaist.ac.kr/",
@@ -947,7 +1044,6 @@ def demo_report():
         ],
 
         "security_signals": [
-
             {
                 "severity": "high",
 
@@ -955,9 +1051,8 @@ def demo_report():
                     "Unofficial application channel",
 
                 "detail":
-                    "Sensitive documents should "
-                    "not be sent to unverified "
-                    "messaging accounts.",
+                    "Sensitive documents should not be sent to "
+                    "unverified messaging accounts.",
             }
         ],
 
@@ -968,16 +1063,27 @@ def demo_report():
         ],
 
         "sources": [
+            {
+                "title":
+                    "KAIST Scholarship",
+
+                "url":
+                    "https://admission.kaist.ac.kr/"
+                    "intl-undergraduate/support/"
+                    "scholarships/kaist/",
+
+                "official": True,
+            },
 
             {
                 "title":
-                    "KAIST Office of Admissions",
+                    "KAIST International Admissions",
 
                 "url":
                     "https://admission.kaist.ac.kr/",
 
                 "official": True,
-            }
+            },
         ],
     }
 
@@ -1192,7 +1298,7 @@ def home():
         "message":
             "ScholarProof backend is running",
 
-        "version": "0.7.0",
+        "version": "0.8.0",
 
         "demo_mode":
             DEMO_MODE,
@@ -1256,9 +1362,11 @@ def verify(
                 ).isoformat(),
 
             "source_validation": {
-                "search_sources_found": 1,
-                "official_sources_found": 1,
+                "search_sources_found": 2,
+                "validated_sources_shown": 2,
+                "claims_with_validated_source": 2,
                 "unmatched_claim_sources": 0,
+                "nonofficial_claim_sources": 0,
                 "official_domain":
                     "admission.kaist.ac.kr",
             },
