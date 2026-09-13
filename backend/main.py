@@ -256,7 +256,7 @@ def get_demo_report(request: VerifyRequest):
                         "KAIST Office of Admissions",
 
                     "source_url":
-                        "https://admission.kaist.ac.kr/"
+                        "https://admission.kaist.ac.kr/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/"
                 },
 
                 {
@@ -274,7 +274,7 @@ def get_demo_report(request: VerifyRequest):
                         "KAIST Scholarship Information",
 
                     "source_url":
-                        "https://admission.kaist.ac.kr/"
+                        "https://admission.kaist.ac.kr/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/"
                 },
 
                 {
@@ -292,7 +292,7 @@ def get_demo_report(request: VerifyRequest):
                         "KAIST International Admissions",
 
                     "source_url":
-                        "https://admission.kaist.ac.kr/"
+                        "https://admission.kaist.ac.kr/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/"
                 },
 
                 {
@@ -309,7 +309,7 @@ def get_demo_report(request: VerifyRequest):
                         "Current admissions guide required",
 
                     "source_url":
-                        "https://admission.kaist.ac.kr/"
+                        "https://admission.kaist.ac.kr/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/"
                 }
             ],
 
@@ -352,7 +352,7 @@ def get_demo_report(request: VerifyRequest):
                         "KAIST Office of Admissions",
 
                     "url":
-                        "https://admission.kaist.ac.kr/",
+                        "https://admission.kaist.ac.kr/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/intl-undergraduate/support/scholarships/kaist/",
 
                     "official": True
                 }
