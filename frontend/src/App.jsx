@@ -51,6 +51,9 @@ const translations = {
     evidence: "Official evidence",
     deep: "DEEP VERIFICATION",
     accuracy: "Accuracy matters more than speed.",
+    openSource: "Open source",
+    supporting: "Supporting source",
+    sourceUnavailable: "No validated source link",
   },
 
   uz: {
@@ -100,6 +103,9 @@ const translations = {
     evidence: "Rasmiy dalil",
     deep: "CHUQUR TEKSHIRUV",
     accuracy: "Tezlikdan ko'ra aniqlik muhim.",
+    openSource: "Manbani ochish",
+    supporting: "Qo‘shimcha manba",
+    sourceUnavailable: "Tasdiqlangan manba havolasi yo‘q",
   },
 
   ru: {
@@ -149,6 +155,9 @@ const translations = {
     evidence: "Официальное подтверждение",
     deep: "ГЛУБОКАЯ ПРОВЕРКА",
     accuracy: "Точность важнее скорости.",
+    openSource: "Открыть источник",
+    supporting: "Дополнительный источник",
+    sourceUnavailable: "Нет подтвержденной ссылки на источник",
   },
 };
 
@@ -174,6 +183,55 @@ const STATUS = {
     className: "insufficient",
   },
 };
+
+
+function sourceDomain(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+
+    return hostname.startsWith("www.")
+      ? hostname.slice(4)
+      : hostname;
+  } catch {
+    return "";
+  }
+}
+
+function sourceKey(url) {
+  try {
+    const parsed = new URL(url);
+
+    const hostname = parsed.hostname
+      .toLowerCase()
+      .replace(/^www\./, "");
+
+    const pathname =
+      parsed.pathname === "/"
+        ? "/"
+        : parsed.pathname.replace(/\/+$/, "");
+
+    return `${hostname}${pathname}`.toLowerCase();
+  } catch {
+    return (url || "").trim().toLowerCase();
+  }
+}
+
+function uniqueSources(sources = []) {
+  const seen = new Set();
+
+  return sources.filter((source) => {
+    if (!source?.url) return false;
+
+    const key = sourceKey(source.url);
+
+    if (!key || seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
 
 function App() {
   const [theme, setTheme] = useState(
@@ -438,6 +496,11 @@ ${report.claims
   }
 
   const report = result?.report;
+
+  const displaySources = useMemo(
+    () => uniqueSources(report?.sources || []),
+    [report?.sources]
+  );
 
   return (
     <div className="app">
@@ -806,13 +869,21 @@ ${report.claims
                           {t.evidence}
                         </small>
 
-                        <a
-                          href={claim.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {claim.source_title} ↗
-                        </a>
+                        {claim.source_url ? (
+                          <a
+                            href={claim.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {claim.source_title ||
+                              sourceDomain(claim.source_url) ||
+                              t.official} ↗
+                          </a>
+                        ) : (
+                          <small>
+                            {t.sourceUnavailable}
+                          </small>
+                        )}
                       </div>
                     </article>
                   );
@@ -887,29 +958,45 @@ ${report.claims
                 {t.sources}
               </span>
 
-              {report.sources.map(
-                (source, index) => (
-                  <a
-                    href={source.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    key={index}
-                  >
-                    <div>
-                      <strong>
-                        {source.title}
-                      </strong>
+              {displaySources.length > 0 ? (
+                displaySources.map(
+                  (source) => (
+                    <a
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      key={sourceKey(source.url)}
+                    >
+                      <div>
+                        <strong>
+                          {source.title ||
+                            sourceDomain(source.url) ||
+                            t.official}
+                        </strong>
 
-                      <small>
-                        {source.official
-                          ? t.official
-                          : "Supporting source"}
-                      </small>
-                    </div>
+                        <small>
+                          {source.official
+                            ? `✓ ${t.official}`
+                            : t.supporting}
+                        </small>
 
-                    <span>↗</span>
-                  </a>
+                        <small>
+                          {sourceDomain(source.url)}
+                        </small>
+
+                        <small>
+                          {t.openSource} ↗
+                        </small>
+                      </div>
+
+                      <span>↗</span>
+                    </a>
+                  )
                 )
+              ) : (
+                <div className="empty">
+                  <p>{t.sourceUnavailable}</p>
+                </div>
               )}
             </div>
 
