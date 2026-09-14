@@ -95,7 +95,7 @@ if not DEMO_MODE:
 
 app = FastAPI(
     title="ScholarProof API",
-    version="0.9.0",
+    version="1.0.0",
     description=(
         "Evidence-first scholarship and "
         "admissions verification API."
@@ -1123,111 +1123,431 @@ sources on the web.
 
 
 # =========================================================
-# DEMO REPORT
+# SMART DEMO REPORTS — ZERO OPENAI COST
 # =========================================================
 
-def demo_report():
+def _demo_base(
+    institution: str,
+    official_domain: str,
+    verdict: str,
+    summary: str,
+    risk: str,
+    claims: list,
+    security_signals: list,
+    next_steps: list,
+    sources: list,
+):
+    """
+    IMPORTANT:
+    Smart Demo is a portfolio preview only.
+    It never performs live web research and never calls OpenAI.
+    """
 
     return {
         "language": "English",
+        "institution": institution,
+        "official_domain": official_domain,
+        "verdict": verdict,
+        "summary": summary,
+        "risk": risk,
+        "claims": claims,
+        "security_signals": security_signals,
+        "next_steps": next_steps,
+        "sources": sources,
+    }
 
-        "institution": "KAIST",
 
-        "official_domain":
-            "admission.kaist.ac.kr",
+def demo_report(request: VerifyRequest):
+    """
+    Return a different prebuilt demo depending on the user's input.
 
-        "verdict":
-            "Potentially misleading information detected",
+    This makes the public portfolio interactive while keeping:
+    SCHOLARPROOF_DEMO=true
+    and therefore OpenAI cost = $0.
 
-        "summary":
-            "The submission mixes legitimate scholarship "
-            "information with claims that should be checked "
-            "through official admissions channels.",
+    No screenshot is actually analyzed in Demo Mode.
+    """
 
-        "risk": "high",
+    searchable = " ".join(
+        [
+            request.text or "",
+            request.url or "",
+        ]
+    ).lower()
 
-        "claims": [
+    # -----------------------------------------------------
+    # SCREENSHOT DEMO
+    # -----------------------------------------------------
+    if request.mode == "image":
+        return _demo_base(
+            institution="Screenshot Demo",
+            official_domain="",
+            verdict="Demo preview — live screenshot analysis is disabled",
+            summary=(
+                "The screenshot upload flow is working, but ScholarProof is "
+                "currently in zero-cost Demo Mode. Live image extraction, web "
+                "research, and claim verification are intentionally disabled."
+            ),
+            risk="unknown",
+            claims=[
+                {
+                    "claim": "Screenshot uploaded successfully",
+                    "status": "verified",
+                    "evidence": (
+                        "The frontend accepted the image and sent it to the "
+                        "ScholarProof backend. Live AI analysis is disabled in "
+                        "Demo Mode."
+                    ),
+                    "source_title": "",
+                    "source_url": "",
+                },
+                {
+                    "claim": "Claims inside the screenshot were verified",
+                    "status": "insufficient",
+                    "evidence": (
+                        "Demo Mode does not call the AI model or perform live "
+                        "web research, so the screenshot contents were not "
+                        "actually verified."
+                    ),
+                    "source_title": "",
+                    "source_url": "",
+                },
+            ],
+            security_signals=[
+                {
+                    "severity": "low",
+                    "title": "Zero-cost public demo",
+                    "detail": (
+                        "No OpenAI API request was made for this demo result."
+                    ),
+                }
+            ],
+            next_steps=[
+                "Use the sample text examples to preview ScholarProof reports.",
+                "Live verification can be enabled by the project owner for controlled testing.",
+            ],
+            sources=[],
+        )
+
+    # -----------------------------------------------------
+    # KHALIFA UNIVERSITY
+    # -----------------------------------------------------
+    if (
+        "khalifa" in searchable
+        or "ku.ac.ae" in searchable
+    ):
+        return _demo_base(
+            institution="Khalifa University",
+            official_domain="ku.ac.ae",
+            verdict="Mixed claims detected",
+            summary=(
+                "This Smart Demo shows how ScholarProof separates scholarship, "
+                "admission, and suspicious application-channel claims. It is a "
+                "prebuilt portfolio example, not a live verification."
+            ),
+            risk="high",
+            claims=[
+                {
+                    "claim": (
+                        "Every international undergraduate receives a guaranteed "
+                        "fully funded scholarship."
+                    ),
+                    "status": "contradicted",
+                    "evidence": (
+                        "Scholarship awards are competitive and are not guaranteed "
+                        "for every applicant."
+                    ),
+                    "source_title": "Undergraduate Scholarships",
+                    "source_url": "https://www.ku.ac.ae/scholarships-undergraduate",
+                },
+                {
+                    "claim": "Applicants can secure admission through WhatsApp.",
+                    "status": "contradicted",
+                    "evidence": (
+                        "Official university application processes should use "
+                        "official Khalifa University admissions channels."
+                    ),
+                    "source_title": "Khalifa University",
+                    "source_url": "https://www.ku.ac.ae/",
+                },
+                {
+                    "claim": "Scholarship approval is guaranteed by IELTS and GPA alone.",
+                    "status": "contradicted",
+                    "evidence": (
+                        "Meeting minimum academic criteria does not itself guarantee "
+                        "a scholarship award."
+                    ),
+                    "source_title": "Undergraduate Scholarships",
+                    "source_url": "https://www.ku.ac.ae/scholarships-undergraduate",
+                },
+            ],
+            security_signals=[
+                {
+                    "severity": "high",
+                    "title": "Unofficial messaging-channel claim",
+                    "detail": (
+                        "A request to secure admission or scholarships through "
+                        "WhatsApp should be treated as suspicious unless the "
+                        "university itself confirms that channel."
+                    ),
+                }
+            ],
+            next_steps=[
+                "Open Khalifa University's official admissions pages.",
+                "Confirm current scholarship tiers and eligibility.",
+                "Do not send documents or payments through unverified messaging accounts.",
+            ],
+            sources=[
+                {
+                    "title": "Undergraduate Scholarships",
+                    "url": "https://www.ku.ac.ae/scholarships-undergraduate",
+                    "official": True,
+                },
+                {
+                    "title": "Khalifa University",
+                    "url": "https://www.ku.ac.ae/",
+                    "official": True,
+                },
+            ],
+        )
+
+    # -----------------------------------------------------
+    # UNIVERSITY OF TORONTO
+    # -----------------------------------------------------
+    if (
+        "toronto" in searchable
+        or "utoronto" in searchable
+        or "utoronto.ca" in searchable
+    ):
+        return _demo_base(
+            institution="University of Toronto",
+            official_domain="utoronto.ca",
+            verdict="Scholarship guarantee claim requires caution",
+            summary=(
+                "This Smart Demo illustrates how ScholarProof challenges absolute "
+                "scholarship guarantees. It is a prebuilt portfolio example and "
+                "does not perform live research."
+            ),
+            risk="medium",
+            claims=[
+                {
+                    "claim": (
+                        "Every international student with IELTS 6.0 is guaranteed "
+                        "a full scholarship."
+                    ),
+                    "status": "contradicted",
+                    "evidence": (
+                        "Major University of Toronto international awards are "
+                        "competitive rather than automatic guarantees for every "
+                        "student meeting one test score."
+                    ),
+                    "source_title": "University of Toronto Admissions",
+                    "source_url": "https://future.utoronto.ca/",
+                },
+                {
+                    "claim": "International students may receive scholarships.",
+                    "status": "verified",
+                    "evidence": (
+                        "The university publishes scholarship and financial-award "
+                        "information for applicants, including international students."
+                    ),
+                    "source_title": "University of Toronto Admissions",
+                    "source_url": "https://future.utoronto.ca/",
+                },
+            ],
+            security_signals=[
+                {
+                    "severity": "medium",
+                    "title": "Guaranteed-award language",
+                    "detail": (
+                        "Claims promising a guaranteed full scholarship based on a "
+                        "single score are a common misinformation signal."
+                    ),
+                }
+            ],
+            next_steps=[
+                "Check the current international awards pages.",
+                "Confirm English-language requirements for the exact program.",
+                "Treat 'guaranteed full scholarship' wording cautiously.",
+            ],
+            sources=[
+                {
+                    "title": "University of Toronto Admissions",
+                    "url": "https://future.utoronto.ca/",
+                    "official": True,
+                }
+            ],
+        )
+
+    # -----------------------------------------------------
+    # UNIST
+    # -----------------------------------------------------
+    if "unist" in searchable:
+        return _demo_base(
+            institution="UNIST",
+            official_domain="unist.ac.kr",
+            verdict="Scholarship claim needs exact current-cycle evidence",
+            summary=(
+                "This Smart Demo previews ScholarProof's evidence-first workflow. "
+                "It is not a live admissions-cycle check."
+            ),
+            risk="medium",
+            claims=[
+                {
+                    "claim": "International applicants can receive scholarship support.",
+                    "status": "verified",
+                    "evidence": (
+                        "UNIST publishes information for international applicants "
+                        "and scholarship opportunities."
+                    ),
+                    "source_title": "UNIST",
+                    "source_url": "https://www.unist.ac.kr/",
+                },
+                {
+                    "claim": "A full scholarship is guaranteed for every admitted student.",
+                    "status": "insufficient",
+                    "evidence": (
+                        "A guarantee this broad should be confirmed against the "
+                        "current official admissions and scholarship rules."
+                    ),
+                    "source_title": "UNIST",
+                    "source_url": "https://www.unist.ac.kr/",
+                },
+            ],
+            security_signals=[
+                {
+                    "severity": "medium",
+                    "title": "Absolute funding claim",
+                    "detail": (
+                        "Funding rules can change by admission cycle and student category."
+                    ),
+                }
+            ],
+            next_steps=[
+                "Check the current UNIST international admissions guide.",
+                "Confirm whether funding is automatic, conditional, or competitive.",
+            ],
+            sources=[
+                {
+                    "title": "UNIST",
+                    "url": "https://www.unist.ac.kr/",
+                    "official": True,
+                }
+            ],
+        )
+
+    # -----------------------------------------------------
+    # KAIST
+    # -----------------------------------------------------
+    if "kaist" in searchable:
+        return _demo_base(
+            institution="KAIST",
+            official_domain="admission.kaist.ac.kr",
+            verdict="Potentially misleading information detected",
+            summary=(
+                "This Smart Demo shows how ScholarProof separates a legitimate "
+                "scholarship claim from an unsafe application-channel claim. "
+                "It is a prebuilt example, not live research."
+            ),
+            risk="high",
+            claims=[
+                {
+                    "claim": (
+                        "KAIST offers scholarships to international undergraduate students."
+                    ),
+                    "status": "verified",
+                    "evidence": (
+                        "KAIST publishes scholarship information for international "
+                        "undergraduate applicants."
+                    ),
+                    "source_title": "KAIST Scholarship",
+                    "source_url": (
+                        "https://admission.kaist.ac.kr/"
+                        "intl-undergraduate/support/scholarships/kaist/"
+                    ),
+                },
+                {
+                    "claim": "Applications must be submitted through Telegram.",
+                    "status": "contradicted",
+                    "evidence": (
+                        "Official applications use official university admissions channels."
+                    ),
+                    "source_title": "KAIST International Admissions",
+                    "source_url": "https://admission.kaist.ac.kr/",
+                },
+            ],
+            security_signals=[
+                {
+                    "severity": "high",
+                    "title": "Unofficial application channel",
+                    "detail": (
+                        "Sensitive documents should not be sent to unverified messaging accounts."
+                    ),
+                }
+            ],
+            next_steps=[
+                "Open the institution's official admissions website.",
+                "Confirm the current admissions cycle.",
+                "Use only official application and payment channels.",
+            ],
+            sources=[
+                {
+                    "title": "KAIST Scholarship",
+                    "url": (
+                        "https://admission.kaist.ac.kr/"
+                        "intl-undergraduate/support/scholarships/kaist/"
+                    ),
+                    "official": True,
+                },
+                {
+                    "title": "KAIST International Admissions",
+                    "url": "https://admission.kaist.ac.kr/",
+                    "official": True,
+                },
+            ],
+        )
+
+    # -----------------------------------------------------
+    # GENERIC DEMO FALLBACK
+    # -----------------------------------------------------
+    return _demo_base(
+        institution="Smart Demo",
+        official_domain="",
+        verdict="Live verification is disabled in public Demo Mode",
+        summary=(
+            "ScholarProof recognized your submission, but this public portfolio "
+            "deployment does not spend OpenAI API credits. Use one of the built-in "
+            "KAIST, Khalifa University, University of Toronto, or UNIST examples "
+            "to preview a complete report."
+        ),
+        risk="unknown",
+        claims=[
             {
-                "claim":
-                    "KAIST offers scholarships to international "
-                    "undergraduate students.",
-
-                "status": "verified",
-
-                "evidence":
-                    "KAIST publishes scholarship information for "
-                    "international undergraduate applicants.",
-
-                "source_title":
-                    "KAIST Scholarship",
-
-                "source_url":
-                    "https://admission.kaist.ac.kr/"
-                    "intl-undergraduate/support/"
-                    "scholarships/kaist/",
-            },
-
-            {
-                "claim":
-                    "Applications must be submitted through Telegram.",
-
-                "status": "contradicted",
-
-                "evidence":
-                    "Official applications use official university "
-                    "admissions channels.",
-
-                "source_title":
-                    "KAIST International Admissions",
-
-                "source_url":
-                    "https://admission.kaist.ac.kr/",
-            },
-        ],
-
-        "security_signals": [
-            {
-                "severity": "high",
-
-                "title":
-                    "Unofficial application channel",
-
-                "detail":
-                    "Sensitive documents should not be sent to "
-                    "unverified messaging accounts.",
+                "claim": "The submitted information was live-verified.",
+                "status": "insufficient",
+                "evidence": (
+                    "No live AI or web-research request is made while "
+                    "SCHOLARPROOF_DEMO=true."
+                ),
+                "source_title": "",
+                "source_url": "",
             }
         ],
-
-        "next_steps": [
-            "Open the institution's official admissions website.",
-            "Confirm the current admissions cycle.",
-            "Use only official application and payment channels.",
-        ],
-
-        "sources": [
+        security_signals=[
             {
-                "title":
-                    "KAIST Scholarship",
-
-                "url":
-                    "https://admission.kaist.ac.kr/"
-                    "intl-undergraduate/support/"
-                    "scholarships/kaist/",
-
-                "official": True,
-            },
-
-            {
-                "title":
-                    "KAIST International Admissions",
-
-                "url":
-                    "https://admission.kaist.ac.kr/",
-
-                "official": True,
-            },
+                "severity": "low",
+                "title": "Public zero-cost demo",
+                "detail": (
+                    "This result intentionally avoids a paid OpenAI API call."
+                ),
+            }
         ],
-    }
+        next_steps=[
+            "Try a sample mentioning KAIST, Khalifa University, University of Toronto, or UNIST.",
+            "The project owner can enable controlled real-mode verification for testing.",
+        ],
+        sources=[],
+    )
 
 
 # =========================================================
@@ -1440,7 +1760,7 @@ def home():
         "message":
             "ScholarProof backend is running",
 
-        "version": "0.9.0",
+        "version": "1.0.0",
 
         "demo_mode":
             DEMO_MODE,
@@ -1517,17 +1837,16 @@ def verify(
                 ).isoformat(),
 
             "source_validation": {
-                "search_sources_found": 2,
-                "validated_sources_shown": 2,
-                "claims_with_validated_source": 2,
+                "search_sources_found": 0,
+                "validated_sources_shown": 0,
+                "claims_with_validated_source": 0,
                 "unmatched_claim_sources": 0,
                 "nonofficial_claim_sources": 0,
-                "official_domain":
-                    "admission.kaist.ac.kr",
+                "official_domain": "",
             },
 
             "report":
-                demo_report(),
+                demo_report(request),
         }
 
 
