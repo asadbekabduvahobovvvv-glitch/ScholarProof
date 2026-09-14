@@ -5,6 +5,22 @@
 ScholarProof is an AI-powered verification platform that helps students verify scholarships, university admission requirements, deadlines, funding claims, and suspicious offers using reliable official sources.
 
 🌐 Live demo: https://scholar-proof.vercel.app
+## Screenshots
+
+### Homepage
+![ScholarProof Homepage](screenshots/Screenshot%20From%202026-09-14%2009-13-49.png)
+
+### Screenshot Verification
+![ScholarProof Screenshot Verification](screenshots/Screenshot%20From%202026-09-14%2009-12-42.png)
+
+### Claim Analysis
+![ScholarProof Claim Analysis](screenshots/Screenshot%20From%202026-09-14%2009-12-59.png)
+
+### Security Analysis & Next Steps
+![ScholarProof Security Analysis](screenshots/Screenshot%20From%202026-09-14%2009-13-16.png)
+
+### Verification History
+![ScholarProof History](screenshots/Screenshot%20From%202026-09-14%2009-13-36.png)
 
 ## Problem
 
