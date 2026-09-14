@@ -11,7 +11,7 @@ from threading import Lock
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
@@ -42,11 +42,27 @@ OPENAI_REASONING = os.getenv(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
+# Temporary migration fallback. Delete ADMIN_PASSWORD from Render
+# after ADMIN_PASSWORD_HASH is configured and tested.
+ADMIN_PASSWORD_LEGACY = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET", "")
 ADMIN_SESSION_TTL_SECONDS = int(
     os.getenv("ADMIN_SESSION_TTL_SECONDS", "28800")
 )
+
+ADMIN_COOKIE_NAME = "scholarproof_admin"
+ADMIN_COOKIE_SECURE = (
+    os.getenv("ADMIN_COOKIE_SECURE", "true").lower() == "true"
+)
+
+ADMIN_ALLOWED_ORIGINS = {
+    "https://scholar-proof.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+}
 
 INITIAL_KILL_SWITCH = (
     os.getenv("SCHOLARPROOF_KILL_SWITCH", "false").lower() == "true"
@@ -88,8 +104,17 @@ DAILY_GLOBAL_LIMIT = int(
     os.getenv("SCHOLARPROOF_DAILY_LIMIT", "10")
 )
 
+BURST_LIMIT_REQUESTS = int(
+    os.getenv("SCHOLARPROOF_BURST_LIMIT", "2")
+)
+
+BURST_WINDOW_SECONDS = int(
+    os.getenv("SCHOLARPROOF_BURST_WINDOW_SECONDS", "60")
+)
+
 _rate_lock = Lock()
 _ip_requests = defaultdict(deque)
+_ip_burst_requests = defaultdict(deque)
 
 _daily_state = {
     "date": datetime.now(timezone.utc).date().isoformat(),
@@ -115,7 +140,7 @@ client = (
 
 app = FastAPI(
     title="ScholarProof API",
-    version="1.1.0",
+    version="1.2.0",
     description=(
         "Evidence-first scholarship and "
         "admissions verification API."
@@ -133,9 +158,36 @@ app.add_middleware(
         "https://scholar-proof.vercel.app",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(
+    request: Request,
+    call_next,
+):
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=()"
+    )
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    )
+
+    if request.url.path.startswith("/admin"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+
+    return response
 
 
 # =========================================================
@@ -185,9 +237,77 @@ def _b64url_decode(value: str) -> bytes:
 def admin_configured() -> bool:
     return bool(
         ADMIN_USERNAME
-        and ADMIN_PASSWORD
+        and (
+            ADMIN_PASSWORD_HASH
+            or ADMIN_PASSWORD_LEGACY
+        )
         and ADMIN_SESSION_SECRET
     )
+
+
+def verify_admin_password(password: str) -> bool:
+    """
+    Preferred format:
+    pbkdf2_sha256$600000$<salt_b64url>$<digest_b64url>
+
+    ADMIN_PASSWORD is supported only as a temporary migration
+    fallback. Remove it from Render after the hash is working.
+    """
+
+    if ADMIN_PASSWORD_HASH:
+        try:
+            algorithm, iterations_text, salt_text, digest_text = (
+                ADMIN_PASSWORD_HASH.split("$", 3)
+            )
+
+            if algorithm != "pbkdf2_sha256":
+                return False
+
+            iterations = int(iterations_text)
+
+            if iterations < 100_000:
+                return False
+
+            salt = _b64url_decode(salt_text)
+            expected_digest = _b64url_decode(digest_text)
+
+            actual_digest = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt,
+                iterations,
+            )
+
+            return hmac.compare_digest(
+                actual_digest,
+                expected_digest,
+            )
+
+        except Exception:
+            return False
+
+    if ADMIN_PASSWORD_LEGACY:
+        return hmac.compare_digest(
+            password,
+            ADMIN_PASSWORD_LEGACY,
+        )
+
+    return False
+
+
+def require_admin_origin(http_request: Request):
+    """
+    Protect state-changing cookie-authenticated admin requests
+    against cross-site request forgery.
+    """
+
+    origin = http_request.headers.get("origin", "")
+
+    if origin not in ADMIN_ALLOWED_ORIGINS:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin request origin is not allowed.",
+        )
 
 
 def create_admin_token(username: str) -> str:
@@ -222,85 +342,55 @@ def require_admin(http_request: Request):
     if not admin_configured():
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Admin panel is not configured."
-            ),
+            detail="Admin panel is not configured.",
         )
 
-    authorization = (
-        http_request.headers.get(
-            "authorization",
-            "",
-        )
+    token = http_request.cookies.get(
+        ADMIN_COOKIE_NAME,
+        "",
     )
 
-    if not authorization.startswith(
-        "Bearer "
-    ):
+    if not token:
         raise HTTPException(
             status_code=401,
             detail="Admin login required.",
         )
 
-    token = authorization[7:].strip()
-
     try:
-        encoded, signature_text = (
-            token.split(".", 1)
-        )
+        encoded, signature_text = token.split(".", 1)
 
         expected_signature = hmac.new(
-            ADMIN_SESSION_SECRET.encode(
-                "utf-8"
-            ),
+            ADMIN_SESSION_SECRET.encode("utf-8"),
             encoded.encode("utf-8"),
             hashlib.sha256,
         ).digest()
 
-        supplied_signature = (
-            _b64url_decode(
-                signature_text
-            )
+        supplied_signature = _b64url_decode(
+            signature_text
         )
 
         if not hmac.compare_digest(
             expected_signature,
             supplied_signature,
         ):
-            raise ValueError(
-                "Bad signature"
-            )
+            raise ValueError("Bad signature")
 
         payload = json.loads(
-            _b64url_decode(
-                encoded
-            ).decode("utf-8")
+            _b64url_decode(encoded).decode("utf-8")
         )
 
-        if (
-            payload.get("sub")
-            != ADMIN_USERNAME
-        ):
-            raise ValueError(
-                "Wrong admin"
-            )
+        if payload.get("sub") != ADMIN_USERNAME:
+            raise ValueError("Wrong admin")
 
-        if int(
-            payload.get("exp", 0)
-        ) < int(time.time()):
-            raise ValueError(
-                "Expired token"
-            )
+        if int(payload.get("exp", 0)) < int(time.time()):
+            raise ValueError("Expired token")
 
         return payload
 
     except Exception:
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Admin session is invalid "
-                "or expired."
-            ),
+            detail="Admin session is invalid or expired.",
         )
 
 
@@ -365,7 +455,7 @@ def admin_status_payload():
             )
 
     return {
-        "backend_version": "1.1.0",
+        "backend_version": "1.2.0",
         "demo_mode":
             settings["demo_mode"],
         "effective_demo_mode":
@@ -390,6 +480,14 @@ def admin_status_payload():
             RATE_LIMIT_REQUESTS,
         "per_ip_window_seconds":
             RATE_LIMIT_WINDOW_SECONDS,
+        "burst_limit":
+            BURST_LIMIT_REQUESTS,
+        "burst_window_seconds":
+            BURST_WINDOW_SECONDS,
+        "password_hash_enabled":
+            bool(ADMIN_PASSWORD_HASH),
+        "legacy_plain_password_enabled":
+            bool(ADMIN_PASSWORD_LEGACY),
         "updated_at":
             settings["updated_at"],
         "runtime_note": (
@@ -470,6 +568,35 @@ def enforce_api_limits(http_request: Request):
             )
 
         # -------------------------------------------------
+        # SHORT BURST LIMIT
+        # -------------------------------------------------
+        burst_queue = _ip_burst_requests[client_ip]
+        burst_cutoff = now - BURST_WINDOW_SECONDS
+
+        while burst_queue and burst_queue[0] <= burst_cutoff:
+            burst_queue.popleft()
+
+        if len(burst_queue) >= BURST_LIMIT_REQUESTS:
+            retry_after = max(
+                1,
+                int(
+                    BURST_WINDOW_SECONDS
+                    - (now - burst_queue[0])
+                ),
+            )
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many verification requests in a short period. "
+                    "Please wait and try again."
+                ),
+                headers={
+                    "Retry-After": str(retry_after)
+                },
+            )
+
+        # -------------------------------------------------
         # PER-IP WINDOW
         # -------------------------------------------------
         queue = _ip_requests[client_ip]
@@ -499,6 +626,7 @@ def enforce_api_limits(http_request: Request):
             )
 
         # Count the request before the paid API call begins.
+        burst_queue.append(now)
         queue.append(now)
         _daily_state["count"] += 1
 
@@ -2055,7 +2183,7 @@ def home():
         "message":
             "ScholarProof backend is running",
 
-        "version": "1.1.0",
+        "version": "1.2.0",
 
         "demo_mode":
             settings["demo_mode"],
@@ -2115,6 +2243,12 @@ def health():
 
         "daily_global_limit":
             DAILY_GLOBAL_LIMIT,
+
+        "burst_limit":
+            BURST_LIMIT_REQUESTS,
+
+        "burst_window_seconds":
+            BURST_WINDOW_SECONDS,
     }
 
 
@@ -2126,7 +2260,10 @@ def health():
 def admin_login(
     login: AdminLoginRequest,
     http_request: Request,
+    response: Response,
 ):
+
+    require_admin_origin(http_request)
 
     if not admin_configured():
         raise HTTPException(
@@ -2146,9 +2283,8 @@ def admin_login(
         ADMIN_USERNAME,
     )
 
-    password_ok = hmac.compare_digest(
-        login.password,
-        ADMIN_PASSWORD,
+    password_ok = verify_admin_password(
+        login.password
     )
 
     if not (
@@ -2163,12 +2299,24 @@ def admin_login(
             ),
         )
 
+    token = create_admin_token(
+        ADMIN_USERNAME
+    )
+
+    response.set_cookie(
+        key=ADMIN_COOKIE_NAME,
+        value=token,
+        max_age=ADMIN_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="none",
+        path="/",
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+
     return {
         "success": True,
-        "token":
-            create_admin_token(
-                ADMIN_USERNAME
-            ),
         "expires_in":
             ADMIN_SESSION_TTL_SECONDS,
     }
@@ -2191,6 +2339,10 @@ def admin_settings(
     updates: AdminSettingsRequest,
     http_request: Request,
 ):
+
+    require_admin_origin(
+        http_request
+    )
 
     require_admin(
         http_request
@@ -2272,6 +2424,32 @@ def admin_settings(
         "success": True,
         "status":
             admin_status_payload(),
+    }
+
+
+
+@app.post("/admin/logout")
+def admin_logout(
+    http_request: Request,
+    response: Response,
+):
+
+    require_admin_origin(
+        http_request
+    )
+
+    # Logout is safe even if the session already expired.
+    response.delete_cookie(
+        key=ADMIN_COOKIE_NAME,
+        path="/",
+        secure=ADMIN_COOKIE_SECURE,
+        samesite="none",
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+
+    return {
+        "success": True
     }
 
 

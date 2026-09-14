@@ -235,9 +235,8 @@ function uniqueSources(sources = []) {
 
 
 function AdminPanel() {
-  const [token, setToken] = useState(
-    sessionStorage.getItem("scholarproof-admin-token") || ""
-  );
+  const [authenticated, setAuthenticated] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -472,73 +471,61 @@ function AdminPanel() {
   `;
 
   async function adminFetch(path, options = {}) {
-    const headers = {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    };
-
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = await fetch(`${API_URL}${path}`, {
       ...options,
-      headers,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
     });
 
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      if (response.status === 401 && path !== "/admin/login") {
-        sessionStorage.removeItem("scholarproof-admin-token");
-        setToken("");
+      if (response.status === 401) {
+        setAuthenticated(false);
         setStatus(null);
       }
 
-      throw new Error(data.detail || "Admin request failed.");
+      throw new Error(
+        data.detail || "Admin request failed."
+      );
     }
 
     return data;
   }
 
-  async function loadStatus(currentToken = token) {
-    if (!currentToken) return;
-
+  async function loadStatus() {
     setBusy(true);
     setError("");
 
     try {
-      const response = await fetch(`${API_URL}/admin/status`, {
-        headers: {
-          Authorization: `Bearer ${currentToken}`,
-        },
-      });
-
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Could not load admin status.");
-      }
+      const data = await adminFetch(
+        "/admin/status",
+        {
+          method: "GET",
+        }
+      );
 
       setStatus(data);
+      setAuthenticated(true);
     } catch (err) {
-      setError(err.message);
-
-      if (/session|login|expired|invalid/i.test(err.message)) {
-        sessionStorage.removeItem("scholarproof-admin-token");
-        setToken("");
-        setStatus(null);
+      if (!/login required/i.test(err.message)) {
+        setError(err.message);
       }
+
+      setAuthenticated(false);
+      setStatus(null);
     } finally {
       setBusy(false);
+      setCheckingSession(false);
     }
   }
 
   useEffect(() => {
-    if (token) {
-      loadStatus(token);
-    }
-  }, [token]);
+    loadStatus();
+  }, []);
 
   async function login(event) {
     event.preventDefault();
@@ -546,32 +533,22 @@ function AdminPanel() {
     setError("");
 
     try {
-      const data = await fetch(`${API_URL}/admin/login`, {
+      await adminFetch("/admin/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({
           username,
           password,
         }),
-      }).then(async (response) => {
-        const body = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-          throw new Error(body.detail || "Login failed.");
-        }
-
-        return body;
       });
 
-      sessionStorage.setItem(
-        "scholarproof-admin-token",
-        data.token
-      );
-
-      setToken(data.token);
       setPassword("");
+
+      await loadStatus();
+
+      if (!authenticated) {
+        // loadStatus updates state asynchronously; status is the
+        // authoritative confirmation that the HttpOnly cookie worked.
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -595,10 +572,13 @@ function AdminPanel() {
         }
       }
 
-      const data = await adminFetch("/admin/settings", {
-        method: "POST",
-        body: JSON.stringify(changes),
-      });
+      const data = await adminFetch(
+        "/admin/settings",
+        {
+          method: "POST",
+          body: JSON.stringify(changes),
+        }
+      );
 
       setStatus(data.status);
     } catch (err) {
@@ -608,13 +588,27 @@ function AdminPanel() {
     }
   }
 
-  function logout() {
-    sessionStorage.removeItem("scholarproof-admin-token");
-    setToken("");
-    setStatus(null);
-    setUsername("");
-    setPassword("");
+  async function logout() {
+    setBusy(true);
     setError("");
+
+    try {
+      await adminFetch(
+        "/admin/logout",
+        {
+          method: "POST",
+          body: "{}",
+        }
+      );
+    } catch {
+      // Clear local UI state even when the cookie already expired.
+    } finally {
+      setAuthenticated(false);
+      setStatus(null);
+      setUsername("");
+      setPassword("");
+      setBusy(false);
+    }
   }
 
   return (
@@ -633,11 +627,15 @@ function AdminPanel() {
           </a>
         </div>
 
-        {!token ? (
+        {checkingSession ? (
+          <div className="admin-card admin-login">
+            <p className="admin-muted">Checking secure session...</p>
+          </div>
+        ) : !authenticated ? (
           <form className="admin-card admin-login" onSubmit={login}>
             <h2>Admin login</h2>
             <p className="admin-muted">
-              Use the private credentials stored in Render Environment.
+              Secure admin login. Session is stored in an HttpOnly cookie.
             </p>
 
             <div className="admin-field">
@@ -785,9 +783,16 @@ function AdminPanel() {
                 </div>
 
                 <div className="admin-note">
-                  <strong>Protection:</strong> {status.per_ip_limit} real AI requests
-                  per IP every {Math.round(status.per_ip_window_seconds / 60)} minutes,
+                  <strong>Protection:</strong> {status.burst_limit} request burst limit
+                  per {status.burst_window_seconds} seconds, {status.per_ip_limit} real AI
+                  requests per IP every {Math.round(status.per_ip_window_seconds / 60)} minutes,
                   with a global limit of {status.daily_limit} per day.
+                  <br />
+                  <br />
+                  Password hashing:{" "}
+                  <strong>
+                    {status.password_hash_enabled ? "ENABLED" : "MIGRATION NEEDED"}
+                  </strong>
                   <br />
                   <br />
                   {status.runtime_note}
