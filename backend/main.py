@@ -1,9 +1,5 @@
-import base64
-import hashlib
-import hmac
 import json
 import os
-import secrets
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -11,7 +7,7 @@ from threading import Lock
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
@@ -40,42 +36,6 @@ OPENAI_REASONING = os.getenv(
 )
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
-ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
-# Temporary migration fallback. Delete ADMIN_PASSWORD from Render
-# after ADMIN_PASSWORD_HASH is configured and tested.
-ADMIN_PASSWORD_LEGACY = os.getenv("ADMIN_PASSWORD", "")
-ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET", "")
-ADMIN_SESSION_TTL_SECONDS = int(
-    os.getenv("ADMIN_SESSION_TTL_SECONDS", "28800")
-)
-
-ADMIN_COOKIE_NAME = "scholarproof_admin"
-ADMIN_COOKIE_SECURE = (
-    os.getenv("ADMIN_COOKIE_SECURE", "true").lower() == "true"
-)
-
-ADMIN_ALLOWED_ORIGINS = {
-    "https://scholar-proof.vercel.app",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-}
-
-INITIAL_KILL_SWITCH = (
-    os.getenv("SCHOLARPROOF_KILL_SWITCH", "false").lower() == "true"
-)
-
-_runtime_lock = Lock()
-_runtime_settings = {
-    "demo_mode": DEMO_MODE,
-    "deep_audit": DEEP_AUDIT,
-    "kill_switch": INITIAL_KILL_SWITCH,
-    "updated_at": datetime.now(timezone.utc).isoformat(),
-}
-
 
 # =========================================================
 # BASIC API ABUSE PROTECTION
@@ -123,15 +83,19 @@ _daily_state = {
 
 
 
-# Create the client only when a key exists.
-# Demo Mode still makes ZERO OpenAI requests.
-# Keeping the client available lets the private admin panel switch
-# real verification on without a Render redeploy.
-client = (
-    OpenAI(api_key=OPENAI_API_KEY)
-    if OPENAI_API_KEY
-    else None
-)
+# OpenAI client is NOT created in demo mode.
+# This makes accidental spending much harder.
+client = None
+
+if not DEMO_MODE:
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OPENAI_API_KEY is missing."
+        )
+
+    client = OpenAI(
+        api_key=OPENAI_API_KEY
+    )
 
 
 # =========================================================
@@ -140,7 +104,7 @@ client = (
 
 app = FastAPI(
     title="ScholarProof API",
-    version="1.2.0",
+    version="1.0.0",
     description=(
         "Evidence-first scholarship and "
         "admissions verification API."
@@ -179,323 +143,8 @@ async def security_headers_middleware(
     response.headers["Strict-Transport-Security"] = (
         "max-age=31536000; includeSubDomains"
     )
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
-    )
-
-    if request.url.path.startswith("/admin"):
-        response.headers["Cache-Control"] = "no-store, max-age=0"
-        response.headers["Pragma"] = "no-cache"
 
     return response
-
-
-# =========================================================
-# RUNTIME SETTINGS + ADMIN AUTH
-# =========================================================
-
-_admin_login_attempts = defaultdict(deque)
-
-
-def get_runtime_settings():
-    with _runtime_lock:
-        return dict(_runtime_settings)
-
-
-def effective_demo_mode() -> bool:
-    settings = get_runtime_settings()
-
-    return bool(
-        settings["demo_mode"]
-        or settings["kill_switch"]
-    )
-
-
-def paid_ai_enabled() -> bool:
-    return (
-        not effective_demo_mode()
-        and client is not None
-    )
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return (
-        base64.urlsafe_b64encode(raw)
-        .decode("utf-8")
-        .rstrip("=")
-    )
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-
-    return base64.urlsafe_b64decode(
-        value + padding
-    )
-
-
-def admin_configured() -> bool:
-    return bool(
-        ADMIN_USERNAME
-        and (
-            ADMIN_PASSWORD_HASH
-            or ADMIN_PASSWORD_LEGACY
-        )
-        and ADMIN_SESSION_SECRET
-    )
-
-
-def verify_admin_password(password: str) -> bool:
-    """
-    Preferred format:
-    pbkdf2_sha256$600000$<salt_b64url>$<digest_b64url>
-
-    ADMIN_PASSWORD is supported only as a temporary migration
-    fallback. Remove it from Render after the hash is working.
-    """
-
-    if ADMIN_PASSWORD_HASH:
-        try:
-            algorithm, iterations_text, salt_text, digest_text = (
-                ADMIN_PASSWORD_HASH.split("$", 3)
-            )
-
-            if algorithm != "pbkdf2_sha256":
-                return False
-
-            iterations = int(iterations_text)
-
-            if iterations < 100_000:
-                return False
-
-            salt = _b64url_decode(salt_text)
-            expected_digest = _b64url_decode(digest_text)
-
-            actual_digest = hashlib.pbkdf2_hmac(
-                "sha256",
-                password.encode("utf-8"),
-                salt,
-                iterations,
-            )
-
-            return hmac.compare_digest(
-                actual_digest,
-                expected_digest,
-            )
-
-        except Exception:
-            return False
-
-    if ADMIN_PASSWORD_LEGACY:
-        return hmac.compare_digest(
-            password,
-            ADMIN_PASSWORD_LEGACY,
-        )
-
-    return False
-
-
-def require_admin_origin(http_request: Request):
-    """
-    Protect state-changing cookie-authenticated admin requests
-    against cross-site request forgery.
-    """
-
-    origin = http_request.headers.get("origin", "")
-
-    if origin not in ADMIN_ALLOWED_ORIGINS:
-        raise HTTPException(
-            status_code=403,
-            detail="Admin request origin is not allowed.",
-        )
-
-
-def create_admin_token(username: str) -> str:
-    payload = {
-        "sub": username,
-        "exp": int(time.time())
-        + ADMIN_SESSION_TTL_SECONDS,
-        "nonce": secrets.token_urlsafe(12),
-    }
-
-    encoded = _b64url_encode(
-        json.dumps(
-            payload,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    )
-
-    signature = hmac.new(
-        ADMIN_SESSION_SECRET.encode("utf-8"),
-        encoded.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-
-    return (
-        encoded
-        + "."
-        + _b64url_encode(signature)
-    )
-
-
-def require_admin(http_request: Request):
-    if not admin_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="Admin panel is not configured.",
-        )
-
-    token = http_request.cookies.get(
-        ADMIN_COOKIE_NAME,
-        "",
-    )
-
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail="Admin login required.",
-        )
-
-    try:
-        encoded, signature_text = token.split(".", 1)
-
-        expected_signature = hmac.new(
-            ADMIN_SESSION_SECRET.encode("utf-8"),
-            encoded.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
-
-        supplied_signature = _b64url_decode(
-            signature_text
-        )
-
-        if not hmac.compare_digest(
-            expected_signature,
-            supplied_signature,
-        ):
-            raise ValueError("Bad signature")
-
-        payload = json.loads(
-            _b64url_decode(encoded).decode("utf-8")
-        )
-
-        if payload.get("sub") != ADMIN_USERNAME:
-            raise ValueError("Wrong admin")
-
-        if int(payload.get("exp", 0)) < int(time.time()):
-            raise ValueError("Expired token")
-
-        return payload
-
-    except Exception:
-        raise HTTPException(
-            status_code=401,
-            detail="Admin session is invalid or expired.",
-        )
-
-
-def enforce_admin_login_limit(
-    http_request: Request,
-):
-    client_ip = get_client_ip(
-        http_request
-    )
-
-    now = time.time()
-    window_seconds = 900
-    max_attempts = 5
-
-    queue = _admin_login_attempts[
-        client_ip
-    ]
-
-    cutoff = (
-        now - window_seconds
-    )
-
-    while (
-        queue
-        and queue[0] <= cutoff
-    ):
-        queue.popleft()
-
-    if len(queue) >= max_attempts:
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                "Too many admin login attempts. "
-                "Try again later."
-            ),
-            headers={
-                "Retry-After": "900"
-            },
-        )
-
-    queue.append(now)
-
-
-def admin_status_payload():
-    settings = get_runtime_settings()
-
-    today = (
-        datetime.now(timezone.utc)
-        .date()
-        .isoformat()
-    )
-
-    with _rate_lock:
-        if (
-            _daily_state["date"]
-            != today
-        ):
-            daily_count = 0
-        else:
-            daily_count = (
-                _daily_state["count"]
-            )
-
-    return {
-        "backend_version": "1.2.0",
-        "demo_mode":
-            settings["demo_mode"],
-        "effective_demo_mode":
-            effective_demo_mode(),
-        "deep_audit":
-            settings["deep_audit"],
-        "kill_switch":
-            settings["kill_switch"],
-        "paid_ai_enabled":
-            paid_ai_enabled(),
-        "api_key_configured":
-            bool(OPENAI_API_KEY),
-        "model":
-            OPENAI_MODEL,
-        "reasoning":
-            OPENAI_REASONING,
-        "daily_requests":
-            daily_count,
-        "daily_limit":
-            DAILY_GLOBAL_LIMIT,
-        "per_ip_limit":
-            RATE_LIMIT_REQUESTS,
-        "per_ip_window_seconds":
-            RATE_LIMIT_WINDOW_SECONDS,
-        "burst_limit":
-            BURST_LIMIT_REQUESTS,
-        "burst_window_seconds":
-            BURST_WINDOW_SECONDS,
-        "password_hash_enabled":
-            bool(ADMIN_PASSWORD_HASH),
-        "legacy_plain_password_enabled":
-            bool(ADMIN_PASSWORD_LEGACY),
-        "updated_at":
-            settings["updated_at"],
-        "runtime_note": (
-            "Runtime switches reset to Render "
-            "environment defaults after a "
-            "backend restart or redeploy."
-        ),
-    }
 
 
 # =========================================================
@@ -538,7 +187,7 @@ def enforce_api_limits(http_request: Request):
     substitute for Redis / Cloudflare / API gateway protection at scale.
     """
 
-    if effective_demo_mode() or not RATE_LIMIT_ENABLED:
+    if DEMO_MODE or not RATE_LIMIT_ENABLED:
         return
 
     now = time.time()
@@ -641,17 +290,6 @@ class VerifyRequest(BaseModel):
     text: str | None = None
     url: str | None = None
     image_data_url: str | None = None
-
-
-class AdminLoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class AdminSettingsRequest(BaseModel):
-    demo_mode: bool | None = None
-    deep_audit: bool | None = None
-    kill_switch: bool | None = None
 
 
 # =========================================================
@@ -2177,30 +1815,22 @@ Return the full corrected report.
 @app.get("/")
 def home():
 
-    settings = get_runtime_settings()
-
     return {
         "message":
             "ScholarProof backend is running",
 
-        "version": "1.2.0",
+        "version": "1.0.0",
 
         "demo_mode":
-            settings["demo_mode"],
-
-        "effective_demo_mode":
-            effective_demo_mode(),
+            DEMO_MODE,
 
         "deep_audit":
-            settings["deep_audit"],
-
-        "kill_switch":
-            settings["kill_switch"],
+            DEEP_AUDIT,
 
         "model":
             (
                 "disabled"
-                if effective_demo_mode()
+                if DEMO_MODE
                 else OPENAI_MODEL
             ),
     }
@@ -2209,28 +1839,20 @@ def home():
 @app.get("/health")
 def health():
 
-    settings = get_runtime_settings()
-
     return {
         "status": "ok",
 
         "demo_mode":
-            settings["demo_mode"],
-
-        "effective_demo_mode":
-            effective_demo_mode(),
+            DEMO_MODE,
 
         "api_spending_enabled":
-            paid_ai_enabled(),
+            not DEMO_MODE,
 
         "deep_audit_enabled":
             (
-                settings["deep_audit"]
-                and not effective_demo_mode()
+                DEEP_AUDIT
+                and not DEMO_MODE
             ),
-
-        "kill_switch":
-            settings["kill_switch"],
 
         "rate_limit_enabled":
             RATE_LIMIT_ENABLED,
@@ -2252,207 +1874,6 @@ def health():
     }
 
 
-# =========================================================
-# PRIVATE ADMIN API
-# =========================================================
-
-@app.post("/admin/login")
-def admin_login(
-    login: AdminLoginRequest,
-    http_request: Request,
-    response: Response,
-):
-
-    require_admin_origin(http_request)
-
-    if not admin_configured():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Admin environment variables "
-                "are not fully configured."
-            ),
-        )
-
-    enforce_admin_login_limit(
-        http_request
-    )
-
-    username_ok = hmac.compare_digest(
-        login.username,
-        ADMIN_USERNAME,
-    )
-
-    password_ok = verify_admin_password(
-        login.password
-    )
-
-    if not (
-        username_ok
-        and password_ok
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "Invalid admin username "
-                "or password."
-            ),
-        )
-
-    token = create_admin_token(
-        ADMIN_USERNAME
-    )
-
-    response.set_cookie(
-        key=ADMIN_COOKIE_NAME,
-        value=token,
-        max_age=ADMIN_SESSION_TTL_SECONDS,
-        httponly=True,
-        secure=ADMIN_COOKIE_SECURE,
-        samesite="none",
-        path="/",
-    )
-
-    response.headers["Cache-Control"] = "no-store"
-
-    return {
-        "success": True,
-        "expires_in":
-            ADMIN_SESSION_TTL_SECONDS,
-    }
-
-
-@app.get("/admin/status")
-def admin_status(
-    http_request: Request,
-):
-
-    require_admin(
-        http_request
-    )
-
-    return admin_status_payload()
-
-
-@app.post("/admin/settings")
-def admin_settings(
-    updates: AdminSettingsRequest,
-    http_request: Request,
-):
-
-    require_admin_origin(
-        http_request
-    )
-
-    require_admin(
-        http_request
-    )
-
-    with _runtime_lock:
-
-        if (
-            updates.kill_switch
-            is not None
-        ):
-            _runtime_settings[
-                "kill_switch"
-            ] = updates.kill_switch
-
-            if updates.kill_switch:
-                _runtime_settings[
-                    "demo_mode"
-                ] = True
-
-                _runtime_settings[
-                    "deep_audit"
-                ] = False
-
-        if (
-            updates.demo_mode
-            is not None
-        ):
-            # Emergency stop always wins.
-            if (
-                _runtime_settings[
-                    "kill_switch"
-                ]
-                and not updates.demo_mode
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "Turn off the emergency "
-                        "kill switch before "
-                        "enabling real AI."
-                    ),
-                )
-
-            if (
-                updates.demo_mode
-                is False
-                and client is None
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "OPENAI_API_KEY is not "
-                        "configured on the backend."
-                    ),
-                )
-
-            _runtime_settings[
-                "demo_mode"
-            ] = updates.demo_mode
-
-        if (
-            updates.deep_audit
-            is not None
-        ):
-            _runtime_settings[
-                "deep_audit"
-            ] = updates.deep_audit
-
-        _runtime_settings[
-            "updated_at"
-        ] = (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        )
-
-    return {
-        "success": True,
-        "status":
-            admin_status_payload(),
-    }
-
-
-
-@app.post("/admin/logout")
-def admin_logout(
-    http_request: Request,
-    response: Response,
-):
-
-    require_admin_origin(
-        http_request
-    )
-
-    # Logout is safe even if the session already expired.
-    response.delete_cookie(
-        key=ADMIN_COOKIE_NAME,
-        path="/",
-        secure=ADMIN_COOKIE_SECURE,
-        samesite="none",
-    )
-
-    response.headers["Cache-Control"] = "no-store"
-
-    return {
-        "success": True
-    }
-
-
 @app.post("/verify")
 def verify(
     request: VerifyRequest,
@@ -2468,7 +1889,7 @@ def verify(
     # DEMO MODE — $0 OPENAI COST
     # =====================================================
 
-    if effective_demo_mode():
+    if DEMO_MODE:
 
         return {
             "success": True,
@@ -2498,22 +1919,10 @@ def verify(
     # REAL MODE
     # =====================================================
 
-    # Real mode requires a configured OpenAI API key.
-    if client is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Real AI verification is unavailable "
-                "because OPENAI_API_KEY is not configured."
-            ),
-        )
-
     # Apply abuse protection only before a paid OpenAI request.
     enforce_api_limits(
         http_request
     )
-
-    runtime_settings = get_runtime_settings()
 
     try:
 
@@ -2529,7 +1938,7 @@ def verify(
         audit_used = False
 
 
-        if runtime_settings["deep_audit"]:
+        if DEEP_AUDIT:
 
             (
                 report,
