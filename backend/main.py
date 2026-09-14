@@ -1,10 +1,13 @@
 import json
 import os
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from threading import Lock
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
@@ -34,6 +37,42 @@ OPENAI_REASONING = os.getenv(
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# =========================================================
+# BASIC API ABUSE PROTECTION
+# =========================================================
+#
+# Demo mode stays unlimited because it makes no OpenAI calls.
+# Real mode is protected by:
+#   1) per-IP hourly request limit
+#   2) global daily request cap
+#
+# These defaults can be changed in Render Environment.
+#
+RATE_LIMIT_ENABLED = (
+    os.getenv("SCHOLARPROOF_RATE_LIMIT_ENABLED", "true").lower() == "true"
+)
+
+RATE_LIMIT_REQUESTS = int(
+    os.getenv("SCHOLARPROOF_RATE_LIMIT_REQUESTS", "5")
+)
+
+RATE_LIMIT_WINDOW_SECONDS = int(
+    os.getenv("SCHOLARPROOF_RATE_LIMIT_WINDOW_SECONDS", "3600")
+)
+
+DAILY_GLOBAL_LIMIT = int(
+    os.getenv("SCHOLARPROOF_DAILY_LIMIT", "10")
+)
+
+_rate_lock = Lock()
+_ip_requests = defaultdict(deque)
+
+_daily_state = {
+    "date": datetime.now(timezone.utc).date().isoformat(),
+    "count": 0,
+}
+
+
 
 # OpenAI client is NOT created in demo mode.
 # This makes accidental spending much harder.
@@ -56,7 +95,7 @@ if not DEMO_MODE:
 
 app = FastAPI(
     title="ScholarProof API",
-    version="0.8.0",
+    version="0.9.0",
     description=(
         "Evidence-first scholarship and "
         "admissions verification API."
@@ -77,6 +116,109 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =========================================================
+# RATE-LIMIT HELPERS
+# =========================================================
+
+def get_client_ip(http_request: Request) -> str:
+    """
+    Render sits behind a reverse proxy, so prefer forwarding headers.
+    The first X-Forwarded-For address is the original client in the
+    normal Render proxy path.
+    """
+
+    forwarded = http_request.headers.get("x-forwarded-for")
+
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+
+        if first:
+            return first
+
+    real_ip = http_request.headers.get("x-real-ip")
+
+    if real_ip:
+        return real_ip.strip()
+
+    if http_request.client:
+        return http_request.client.host
+
+    return "unknown"
+
+
+def enforce_api_limits(http_request: Request):
+    """
+    Protects REAL mode only.
+
+    Note:
+    This is an in-memory MVP limiter. It is useful on a single Render
+    instance, but resets when the service restarts and is not a
+    substitute for Redis / Cloudflare / API gateway protection at scale.
+    """
+
+    if DEMO_MODE or not RATE_LIMIT_ENABLED:
+        return
+
+    now = time.time()
+    client_ip = get_client_ip(http_request)
+
+    with _rate_lock:
+
+        # -------------------------------------------------
+        # GLOBAL DAILY CAP
+        # -------------------------------------------------
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        if _daily_state["date"] != today:
+            _daily_state["date"] = today
+            _daily_state["count"] = 0
+
+        if _daily_state["count"] >= DAILY_GLOBAL_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "ScholarProof reached today's public AI verification "
+                    "limit. Please try again later."
+                ),
+                headers={
+                    "Retry-After": "3600"
+                },
+            )
+
+        # -------------------------------------------------
+        # PER-IP WINDOW
+        # -------------------------------------------------
+        queue = _ip_requests[client_ip]
+        cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+
+        while queue and queue[0] <= cutoff:
+            queue.popleft()
+
+        if len(queue) >= RATE_LIMIT_REQUESTS:
+            retry_after = max(
+                1,
+                int(
+                    RATE_LIMIT_WINDOW_SECONDS
+                    - (now - queue[0])
+                ),
+            )
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Too many ScholarProof AI verification requests "
+                    "from this connection. Please try again later."
+                ),
+                headers={
+                    "Retry-After": str(retry_after)
+                },
+            )
+
+        # Count the request before the paid API call begins.
+        queue.append(now)
+        _daily_state["count"] += 1
 
 
 # =========================================================
@@ -1298,7 +1440,7 @@ def home():
         "message":
             "ScholarProof backend is running",
 
-        "version": "0.8.0",
+        "version": "0.9.0",
 
         "demo_mode":
             DEMO_MODE,
@@ -1332,12 +1474,25 @@ def health():
                 DEEP_AUDIT
                 and not DEMO_MODE
             ),
+
+        "rate_limit_enabled":
+            RATE_LIMIT_ENABLED,
+
+        "rate_limit_per_ip":
+            RATE_LIMIT_REQUESTS,
+
+        "rate_limit_window_seconds":
+            RATE_LIMIT_WINDOW_SECONDS,
+
+        "daily_global_limit":
+            DAILY_GLOBAL_LIMIT,
     }
 
 
 @app.post("/verify")
 def verify(
     request: VerifyRequest,
+    http_request: Request,
 ):
 
     validate_request(
@@ -1379,6 +1534,11 @@ def verify(
     # =====================================================
     # REAL MODE
     # =====================================================
+
+    # Apply abuse protection only before a paid OpenAI request.
+    enforce_api_limits(
+        http_request
+    )
 
     try:
 
