@@ -233,7 +233,595 @@ function uniqueSources(sources = []) {
   });
 }
 
-function App() {
+
+function AdminPanel() {
+  const [token, setToken] = useState(
+    sessionStorage.getItem("scholarproof-admin-token") || ""
+  );
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const adminStyles = `
+    * { box-sizing: border-box; }
+
+    .admin-shell {
+      min-height: 100vh;
+      padding: 40px 18px;
+      background:
+        radial-gradient(circle at 15% 15%, rgba(95, 96, 255, .18), transparent 35%),
+        radial-gradient(circle at 85% 85%, rgba(35, 208, 255, .12), transparent 35%),
+        #080b12;
+      color: #f5f7ff;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .admin-wrap {
+      width: min(980px, 100%);
+      margin: 0 auto;
+    }
+
+    .admin-brand {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .admin-brand h1 {
+      margin: 0;
+      font-size: clamp(26px, 4vw, 42px);
+      letter-spacing: -0.04em;
+    }
+
+    .admin-brand p {
+      margin: 6px 0 0;
+      color: #9da8bd;
+    }
+
+    .admin-back {
+      color: #c9d1ff;
+      text-decoration: none;
+      border: 1px solid #27314a;
+      border-radius: 12px;
+      padding: 10px 14px;
+      background: rgba(255,255,255,.03);
+    }
+
+    .admin-card {
+      background: rgba(15, 20, 32, .88);
+      border: 1px solid #242c42;
+      border-radius: 22px;
+      padding: 24px;
+      box-shadow: 0 24px 90px rgba(0,0,0,.28);
+      backdrop-filter: blur(14px);
+    }
+
+    .admin-login {
+      width: min(460px, 100%);
+      margin: 70px auto 0;
+    }
+
+    .admin-login h2 {
+      margin: 0 0 8px;
+    }
+
+    .admin-muted {
+      color: #98a4ba;
+      line-height: 1.55;
+    }
+
+    .admin-field {
+      display: grid;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .admin-field label {
+      font-size: 13px;
+      color: #b6c0d4;
+    }
+
+    .admin-field input {
+      width: 100%;
+      border: 1px solid #2b3550;
+      background: #0b101b;
+      color: #fff;
+      border-radius: 12px;
+      padding: 13px 14px;
+      outline: none;
+    }
+
+    .admin-field input:focus {
+      border-color: #6978ff;
+      box-shadow: 0 0 0 3px rgba(105,120,255,.13);
+    }
+
+    .admin-primary,
+    .admin-secondary,
+    .admin-danger {
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 16px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    .admin-primary {
+      width: 100%;
+      margin-top: 20px;
+      color: #fff;
+      background: linear-gradient(135deg, #6875ff, #925fff);
+    }
+
+    .admin-secondary {
+      color: #e9edff;
+      background: #1b2234;
+      border: 1px solid #2c3650;
+    }
+
+    .admin-danger {
+      color: #fff;
+      background: #b72f42;
+    }
+
+    button:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    .admin-error {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid #6d2936;
+      color: #ffc4ce;
+      background: #2a1118;
+    }
+
+    .admin-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .admin-stat {
+      background: #0c111d;
+      border: 1px solid #222b40;
+      border-radius: 16px;
+      padding: 18px;
+    }
+
+    .admin-stat small {
+      display: block;
+      color: #8f9ab0;
+      margin-bottom: 8px;
+    }
+
+    .admin-stat strong {
+      font-size: 22px;
+      overflow-wrap: anywhere;
+    }
+
+    .admin-status-ok { color: #5de2a2; }
+    .admin-status-warn { color: #ffd36b; }
+    .admin-status-danger { color: #ff798b; }
+
+    .admin-controls {
+      display: grid;
+      gap: 14px;
+      margin-top: 22px;
+    }
+
+    .admin-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px;
+      background: #0c111d;
+      border: 1px solid #222b40;
+      border-radius: 16px;
+    }
+
+    .admin-control h3 {
+      margin: 0 0 5px;
+      font-size: 16px;
+    }
+
+    .admin-control p {
+      margin: 0;
+      color: #8f9ab0;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .admin-switch {
+      min-width: 96px;
+    }
+
+    .admin-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .admin-note {
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: #15131f;
+      border: 1px solid #332d49;
+      color: #c9c2db;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    @media (max-width: 700px) {
+      .admin-grid { grid-template-columns: 1fr; }
+      .admin-control { align-items: flex-start; flex-direction: column; }
+      .admin-switch { width: 100%; }
+      .admin-switch button { width: 100%; }
+      .admin-brand { align-items: flex-start; flex-direction: column; }
+    }
+  `;
+
+  async function adminFetch(path, options = {}) {
+    const headers = {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    };
+
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers,
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      if (response.status === 401 && path !== "/admin/login") {
+        sessionStorage.removeItem("scholarproof-admin-token");
+        setToken("");
+        setStatus(null);
+      }
+
+      throw new Error(data.detail || "Admin request failed.");
+    }
+
+    return data;
+  }
+
+  async function loadStatus(currentToken = token) {
+    if (!currentToken) return;
+
+    setBusy(true);
+    setError("");
+
+    try {
+      const response = await fetch(`${API_URL}/admin/status`, {
+        headers: {
+          Authorization: `Bearer ${currentToken}`,
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not load admin status.");
+      }
+
+      setStatus(data);
+    } catch (err) {
+      setError(err.message);
+
+      if (/session|login|expired|invalid/i.test(err.message)) {
+        sessionStorage.removeItem("scholarproof-admin-token");
+        setToken("");
+        setStatus(null);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (token) {
+      loadStatus(token);
+    }
+  }, [token]);
+
+  async function login(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+
+    try {
+      const data = await fetch(`${API_URL}/admin/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username,
+          password,
+        }),
+      }).then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(body.detail || "Login failed.");
+        }
+
+        return body;
+      });
+
+      sessionStorage.setItem(
+        "scholarproof-admin-token",
+        data.token
+      );
+
+      setToken(data.token);
+      setPassword("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateSettings(changes) {
+    setBusy(true);
+    setError("");
+
+    try {
+      if (changes.demo_mode === false) {
+        const confirmed = window.confirm(
+          "Enable REAL AI verification? Public Verify requests can spend your OpenAI API balance."
+        );
+
+        if (!confirmed) {
+          setBusy(false);
+          return;
+        }
+      }
+
+      const data = await adminFetch("/admin/settings", {
+        method: "POST",
+        body: JSON.stringify(changes),
+      });
+
+      setStatus(data.status);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function logout() {
+    sessionStorage.removeItem("scholarproof-admin-token");
+    setToken("");
+    setStatus(null);
+    setUsername("");
+    setPassword("");
+    setError("");
+  }
+
+  return (
+    <div className="admin-shell">
+      <style>{adminStyles}</style>
+
+      <div className="admin-wrap">
+        <div className="admin-brand">
+          <div>
+            <h1>ScholarProof Admin</h1>
+            <p>Private control panel · CYBERTEZ</p>
+          </div>
+
+          <a className="admin-back" href="/">
+            ← Public site
+          </a>
+        </div>
+
+        {!token ? (
+          <form className="admin-card admin-login" onSubmit={login}>
+            <h2>Admin login</h2>
+            <p className="admin-muted">
+              Use the private credentials stored in Render Environment.
+            </p>
+
+            <div className="admin-field">
+              <label>Username</label>
+              <input
+                autoComplete="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                required
+              />
+            </div>
+
+            <div className="admin-field">
+              <label>Password</label>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </div>
+
+            <button className="admin-primary" disabled={busy}>
+              {busy ? "Signing in..." : "Sign in"}
+            </button>
+
+            {error && <div className="admin-error">{error}</div>}
+          </form>
+        ) : (
+          <div className="admin-card">
+            {!status ? (
+              <p className="admin-muted">
+                {busy ? "Loading control panel..." : "Status unavailable."}
+              </p>
+            ) : (
+              <>
+                <div className="admin-grid">
+                  <div className="admin-stat">
+                    <small>System</small>
+                    <strong className="admin-status-ok">ONLINE</strong>
+                  </div>
+
+                  <div className="admin-stat">
+                    <small>Paid AI</small>
+                    <strong
+                      className={
+                        status.paid_ai_enabled
+                          ? "admin-status-danger"
+                          : "admin-status-ok"
+                      }
+                    >
+                      {status.paid_ai_enabled ? "ENABLED" : "DISABLED"}
+                    </strong>
+                  </div>
+
+                  <div className="admin-stat">
+                    <small>Requests today</small>
+                    <strong>
+                      {status.daily_requests} / {status.daily_limit}
+                    </strong>
+                  </div>
+
+                  <div className="admin-stat">
+                    <small>Model</small>
+                    <strong>{status.model}</strong>
+                  </div>
+                </div>
+
+                <div className="admin-controls">
+                  <div className="admin-control">
+                    <div>
+                      <h3>Demo Mode</h3>
+                      <p>
+                        ON = Smart Demo, zero OpenAI cost. OFF = real AI verification.
+                      </p>
+                    </div>
+
+                    <div className="admin-switch">
+                      <button
+                        className={
+                          status.demo_mode ? "admin-primary" : "admin-secondary"
+                        }
+                        disabled={busy || status.kill_switch}
+                        onClick={() =>
+                          updateSettings({
+                            demo_mode: !status.demo_mode,
+                          })
+                        }
+                      >
+                        {status.demo_mode ? "ON" : "OFF"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="admin-control">
+                    <div>
+                      <h3>Deep Audit</h3>
+                      <p>
+                        Optional second verification pass. It can increase API usage.
+                      </p>
+                    </div>
+
+                    <div className="admin-switch">
+                      <button
+                        className={
+                          status.deep_audit ? "admin-primary" : "admin-secondary"
+                        }
+                        disabled={busy || status.demo_mode || status.kill_switch}
+                        onClick={() =>
+                          updateSettings({
+                            deep_audit: !status.deep_audit,
+                          })
+                        }
+                      >
+                        {status.deep_audit ? "ON" : "OFF"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="admin-control">
+                    <div>
+                      <h3>Emergency Kill Switch</h3>
+                      <p>
+                        Immediately forces zero-cost Demo Mode and disables Deep Audit.
+                      </p>
+                    </div>
+
+                    <div className="admin-switch">
+                      <button
+                        className={
+                          status.kill_switch ? "admin-danger" : "admin-secondary"
+                        }
+                        disabled={busy}
+                        onClick={() =>
+                          updateSettings({
+                            kill_switch: !status.kill_switch,
+                          })
+                        }
+                      >
+                        {status.kill_switch ? "ACTIVE" : "OFF"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="admin-note">
+                  <strong>Protection:</strong> {status.per_ip_limit} real AI requests
+                  per IP every {Math.round(status.per_ip_window_seconds / 60)} minutes,
+                  with a global limit of {status.daily_limit} per day.
+                  <br />
+                  <br />
+                  {status.runtime_note}
+                </div>
+
+                {error && <div className="admin-error">{error}</div>}
+
+                <div className="admin-actions">
+                  <button
+                    className="admin-secondary"
+                    disabled={busy}
+                    onClick={() => loadStatus()}
+                  >
+                    Refresh status
+                  </button>
+
+                  <button
+                    className="admin-secondary"
+                    onClick={logout}
+                  >
+                    Log out
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function ScholarProofApp() {
   const [theme, setTheme] = useState(
     localStorage.getItem("scholarproof-theme") || "light"
   );
@@ -1139,6 +1727,16 @@ ${report.claims
       </footer>
     </div>
   );
+}
+
+function App() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+
+  if (path === "/admin") {
+    return <AdminPanel />;
+  }
+
+  return <ScholarProofApp />;
 }
 
 export default App;
